@@ -1,3 +1,4 @@
+# rag_prototype/parse_py.py
 from __future__ import annotations
 import ast
 from pathlib import Path
@@ -8,15 +9,19 @@ def _get_source_lines(path: Path) -> List[str]:
     return path.read_text(encoding="utf-8", errors="ignore").splitlines()
 
 def parse_python_file(path: Path) -> List[Chunk]:
+    """
+    Parse a .py file into chunks:
+      - module (whole file)
+      - top-level functions
+      - top-level classes
+    """
     lines = _get_source_lines(path)
     src = "\n".join(lines)
 
     try:
-        # Parse into an AST (Abstract Syntax Tree)
-        # This is Python's built-in parser. It builds a tree representing the structure of the code
         tree = ast.parse(src)
     except SyntaxError:
-        # If parsing fails, treat whole file as one chunk
+        # On parse failure, index the whole file as one module chunk
         return [Chunk(
             id=f"{path}::module",
             text=src,
@@ -29,6 +34,7 @@ def parse_python_file(path: Path) -> List[Chunk]:
 
     chunks: List[Chunk] = []
 
+    # module chunk
     chunks.append(Chunk(
         id=f"{path}::module",
         text=src,
@@ -39,8 +45,6 @@ def parse_python_file(path: Path) -> List[Chunk]:
         metadata={"filename": path.name},
     ))
 
-    # Walk through the top-level nodes and extract functions/classes
-    # Create a Chunk object for each extracted unit
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             start = getattr(node, "lineno", 1)
@@ -55,7 +59,6 @@ def parse_python_file(path: Path) -> List[Chunk]:
                 end_line=end,
                 metadata={"symbol": node.name},
             ))
-
         elif isinstance(node, ast.ClassDef):
             start = getattr(node, "lineno", 1)
             end = getattr(node, "end_lineno", start)
@@ -70,4 +73,4 @@ def parse_python_file(path: Path) -> List[Chunk]:
                 metadata={"symbol": node.name},
             ))
 
-        return chunks
+    return chunks

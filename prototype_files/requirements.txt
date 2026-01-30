@@ -1,0 +1,4 @@
+chromadb>=0.4.7
+sentence-transformers>=2.2.2
+nbformat>=5.7.0
+numpy>=1.24
