@@ -13,6 +13,11 @@ SKIP_DIRS = {
     "data",
     ".chromadb",
     "prototype_files",
+    ".tree-sitter-build",
+    "tree-sitter-python",
+    "bindings",
+    "tests",
+    "Evaluation_Results"
 }
 ALLOW_EXT = {".py", ".ipynb", ".md"}
 
