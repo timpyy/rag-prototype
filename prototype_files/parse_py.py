@@ -8,7 +8,7 @@ from typing import List, Optional
 import libcst as cst
 from libcst.metadata import MetadataWrapper, PositionProvider, CodeRange
 
-from .config import Chunk
+from .config import Chunk, infer_doc_fields
 
 
 def _read_text(path: Path) -> str:
@@ -23,9 +23,6 @@ def _slice_source_by_range(source: str, code_range: CodeRange) -> str:
     lines = source.splitlines()
     start_line = max(1, code_range.start.line)
     end_line = min(len(lines), code_range.end.line)
-
-    # LibCST end position is inclusive in terms of "this node ends on this line",
-    # but columns are not used here; we include whole lines for context.
     return "\n".join(lines[start_line - 1 : end_line])
 
 
@@ -39,25 +36,18 @@ class _DefRecord:
 
 
 class _TopLevelDefCollector(cst.CSTVisitor):
-    """
-    Collect top-level function and class definitions with accurate positions.
-
-    Important: We only collect definitions that are direct children of the module body.
-    This avoids collecting nested defs inside functions/classes.
-    """
     METADATA_DEPENDENCIES = (PositionProvider,)
 
     def __init__(self, source: str) -> None:
         self.source = source
         self.records: List[_DefRecord] = []
-        self._depth = 0  # module body depth
+        self._depth = 0
 
     def visit_Module(self, node: cst.Module) -> Optional[bool]:
         self._depth = 0
         return True
 
     def visit_IndentedBlock(self, node: cst.IndentedBlock) -> Optional[bool]:
-        # entering a block increases depth; top-level defs are only at depth 0
         self._depth += 1
         return True
 
@@ -65,7 +55,6 @@ class _TopLevelDefCollector(cst.CSTVisitor):
         self._depth -= 1
 
     def visit_SimpleStatementSuite(self, node: cst.SimpleStatementSuite) -> Optional[bool]:
-        # one-line suite also increases depth
         self._depth += 1
         return True
 
@@ -83,7 +72,6 @@ class _TopLevelDefCollector(cst.CSTVisitor):
                 end_line=r.end.line,
                 text=text,
             ))
-        # Still traverse children? Not needed for top-level collection; returning False is faster.
         return False
 
     def visit_ClassDef(self, node: cst.ClassDef) -> Optional[bool]:
@@ -102,23 +90,33 @@ class _TopLevelDefCollector(cst.CSTVisitor):
 
 def parse_python_file(path: Path) -> List[Chunk]:
     """
-    LibCST-based parser:
-      - Preserves formatting + comments via exact source slicing using positions.
-      - Extracts: module chunk + top-level function chunks + top-level class chunks.
+    LibCST-based Python parser producing:
+      - module chunk
+      - top-level function chunks
+      - top-level class chunks
+
+    Uses unified metadata fields: doc_type/doc_dir/doc_rank_hint/symbol_name and loc_*.
     """
+    repo_root = Path(__file__).resolve().parents[1]
+    doc_type, doc_dir, doc_rank_hint = infer_doc_fields(repo_root, path)
+
     source = _read_text(path)
     lines = source.splitlines()
 
-    # Always include module chunk (useful for broad questions & top-level script logic)
     chunks: List[Chunk] = [
         Chunk(
             id=f"{path}::module",
             text=source,
             source_path=str(path),
             chunk_type="py_module",
-            start_line=1,
-            end_line=len(lines) if lines else 1,
-            metadata={"filename": path.name, "parser": "libcst"},
+            doc_type=doc_type,
+            doc_dir=doc_dir,
+            doc_rank_hint=doc_rank_hint,
+            symbol_name="",
+            loc_kind="lines",
+            loc_start=1,
+            loc_end=len(lines) if lines else 1,
+            metadata={"parser": "libcst"},
         )
     ]
 
@@ -135,9 +133,14 @@ def parse_python_file(path: Path) -> List[Chunk]:
                     text=rec.text,
                     source_path=str(path),
                     chunk_type="py_function",
-                    start_line=rec.start_line,
-                    end_line=rec.end_line,
-                    metadata={"symbol": rec.name, "parser": "libcst"},
+                    doc_type=doc_type,
+                    doc_dir=doc_dir,
+                    doc_rank_hint=doc_rank_hint,
+                    symbol_name=rec.name,
+                    loc_kind="lines",
+                    loc_start=rec.start_line,
+                    loc_end=rec.end_line,
+                    metadata={"parser": "libcst"},
                 ))
             elif rec.kind == "py_class":
                 chunks.append(Chunk(
@@ -145,22 +148,31 @@ def parse_python_file(path: Path) -> List[Chunk]:
                     text=rec.text,
                     source_path=str(path),
                     chunk_type="py_class",
-                    start_line=rec.start_line,
-                    end_line=rec.end_line,
-                    metadata={"symbol": rec.name, "parser": "libcst"},
+                    doc_type=doc_type,
+                    doc_dir=doc_dir,
+                    doc_rank_hint=doc_rank_hint,
+                    symbol_name=rec.name,
+                    loc_kind="lines",
+                    loc_start=rec.start_line,
+                    loc_end=rec.end_line,
+                    metadata={"parser": "libcst"},
                 ))
 
         return chunks
 
     except Exception:
-        # Fallback: if LibCST fails for any reason, return module chunk only
-        chunks[0] = Chunk(
+        # Fallback: module only
+        return [Chunk(
             id=f"{path}::module",
             text=source,
             source_path=str(path),
             chunk_type="py_module",
-            start_line=1,
-            end_line=len(lines) if lines else 1,
-            metadata={"filename": path.name, "parser": "libcst", "note": "parse_failed_fallback"},
-        )
-        return chunks
+            doc_type=doc_type,
+            doc_dir=doc_dir,
+            doc_rank_hint=doc_rank_hint,
+            symbol_name="",
+            loc_kind="lines",
+            loc_start=1,
+            loc_end=len(lines) if lines else 1,
+            metadata={"parser": "libcst", "note": "parse_failed_fallback"},
+        )]
