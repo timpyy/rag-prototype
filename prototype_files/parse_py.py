@@ -7,7 +7,7 @@ from typing import List, Optional
 from tree_sitter import Language, Parser
 import tree_sitter_python  # pip install tree-sitter-python
 
-from .config import Chunk
+from .config import Chunk, infer_doc_fields
 
 PY_FUNC_NODE = "function_definition"
 PY_CLASS_NODE = "class_definition"
@@ -16,7 +16,6 @@ PY_CLASS_NODE = "class_definition"
 def _get_parser() -> Parser:
     """
     Create a Tree-sitter Parser for Python using the prebuilt tree-sitter-python package.
-    This avoids compiling a shared library manually.
     """
     # tree_sitter_python.language() returns a PyCapsule / pointer to the language
     py_lang = Language(tree_sitter_python.language())
@@ -45,13 +44,17 @@ def _identifier_from_node(source: str, node) -> Optional[str]:
     Tree-sitter-python usually has an identifier field, but we keep it robust.
     """
     # Prefer field lookup if available
-    name_node = node.child_by_field_name("name")
+    try:
+        name_node = node.child_by_field_name("name")
+    except Exception:
+        name_node = None
+
     if name_node is not None:
         return source[name_node.start_byte:name_node.end_byte].strip() or None
 
     # Fallback: search direct children for identifier
     for child in node.children:
-        if child.type == "identifier":
+        if getattr(child, "type", None) == "identifier":
             return source[child.start_byte:child.end_byte].strip() or None
 
     return None
@@ -64,20 +67,29 @@ def parse_python_file(path: Path) -> List[Chunk]:
       - top-level functions
       - top-level classes
 
-    Keeps the output schema consistent with AST/LibCST versions.
+    Emits unified metadata fields so results are comparable across parsers.
     """
+    repo_root = Path(__file__).resolve().parents[1]
+    doc_type, doc_dir, doc_rank_hint = infer_doc_fields(repo_root, path)
+
     source = path.read_text(encoding="utf-8", errors="ignore")
     lines = source.splitlines()
+    n_lines = len(lines) if lines else 1
 
-    # Always include module chunk
+    # Always include a module chunk
     chunks: List[Chunk] = [
         Chunk(
             id=f"{path}::module",
             text=source,
             source_path=str(path),
             chunk_type="py_module",
-            start_line=1,
-            end_line=len(lines) if lines else 1,
+            doc_type=doc_type,
+            doc_dir=doc_dir,
+            doc_rank_hint=doc_rank_hint,
+            symbol_name="",
+            loc_kind="lines",
+            loc_start=1,
+            loc_end=n_lines,
             metadata={"filename": path.name, "parser": "tree-sitter"},
         )
     ]
@@ -90,12 +102,16 @@ def parse_python_file(path: Path) -> List[Chunk]:
     root = tree.root_node  # typically "module"
 
     # We only chunk top-level defs: direct children of the module
-    for child in root.children:
-        if child.type == PY_FUNC_NODE:
+    # Note: tree.children may include newlines/comments; we check node.type
+    for child in getattr(root, "children", []):
+        ntype = getattr(child, "type", "")
+        if ntype == PY_FUNC_NODE:
             name = _identifier_from_node(source, child) or "<anonymous>"
-            start_line = child.start_point[0] + 1
-            end_line = child.end_point[0] + 1
-            snippet = _slice_source_by_points(source, child.start_point[0], child.end_point[0])
+            start_row = child.start_point[0]  # 0-based
+            end_row = child.end_point[0]      # 0-based
+            start_line = start_row + 1        # convert to 1-based
+            end_line = end_row + 1
+            snippet = _slice_source_by_points(source, start_row, end_row)
 
             chunks.append(
                 Chunk(
@@ -103,17 +119,24 @@ def parse_python_file(path: Path) -> List[Chunk]:
                     text=snippet,
                     source_path=str(path),
                     chunk_type="py_function",
-                    start_line=start_line,
-                    end_line=end_line,
-                    metadata={"symbol": name, "parser": "tree-sitter"},
+                    doc_type=doc_type,
+                    doc_dir=doc_dir,
+                    doc_rank_hint=doc_rank_hint,
+                    symbol_name=name,
+                    loc_kind="lines",
+                    loc_start=start_line,
+                    loc_end=end_line,
+                    metadata={"symbol_name": name, "parser": "tree-sitter"},
                 )
             )
 
-        elif child.type == PY_CLASS_NODE:
+        elif ntype == PY_CLASS_NODE:
             name = _identifier_from_node(source, child) or "<anonymous>"
-            start_line = child.start_point[0] + 1
-            end_line = child.end_point[0] + 1
-            snippet = _slice_source_by_points(source, child.start_point[0], child.end_point[0])
+            start_row = child.start_point[0]
+            end_row = child.end_point[0]
+            start_line = start_row + 1
+            end_line = end_row + 1
+            snippet = _slice_source_by_points(source, start_row, end_row)
 
             chunks.append(
                 Chunk(
@@ -121,9 +144,14 @@ def parse_python_file(path: Path) -> List[Chunk]:
                     text=snippet,
                     source_path=str(path),
                     chunk_type="py_class",
-                    start_line=start_line,
-                    end_line=end_line,
-                    metadata={"symbol": name, "parser": "tree-sitter"},
+                    doc_type=doc_type,
+                    doc_dir=doc_dir,
+                    doc_rank_hint=doc_rank_hint,
+                    symbol_name=name,
+                    loc_kind="lines",
+                    loc_start=start_line,
+                    loc_end=end_line,
+                    metadata={"symbol_name": name, "parser": "tree-sitter"},
                 )
             )
 
